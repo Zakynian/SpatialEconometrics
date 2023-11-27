@@ -1,0 +1,212 @@
+library(ggplot2)
+library(tidyverse)
+library(plm)
+library(sf)
+library(maps)
+library(sp)
+library(splm)
+library(stargazer)
+library(spdep)
+library(stringr)
+library(stats)
+library(tmap)
+library(spatialreg)
+
+PanelData <- read.csv("PanelDataLog.csv", sep=",")
+IntegerPanel <- read.csv("PanelDataInteger.csv", sep=",")
+Unbalanced <- read.csv("Unbalanced.csv", sep=",")
+KecBorobudur <- st_read(dsn = "//Users//Dzaky_Macbook//Desktop//Skripsi//Fix Data//Panel Data", layer = "KecamatanBorobudur")
+Borobudur <- left_join(KecBorobudur, PanelData, by = "NAME_4")
+IntegerBorobudur <- left_join(KecBorobudur, IntegerPanel, by = "NAME_4")
+UnbalancedPanel <- left_join(KecBorobudur, Unbalanced, by = "NAME_4")
+
+# Quantile Classification
+breaks = quantile(IntegerBorobudur$POVRATE, na.rm=T, index = c("NAME_4", "YEARS"))
+categories = as.numeric(cut(IntegerBorobudur$POVRATE, breaks), index = c("NAME_4", "YEARS"))
+
+palette = colorRampPalette(c("yellow", "red"))
+ramp = palette(4)
+colors = ramp[categories]
+
+plot(IntegerBorobudur$geometry, border="gray")
+plot(IntegerBorobudur, col=colors, border="gray", add=T, index = c("NAME_4", "YEARS"))
+
+labels = sapply(1:4, function(z) paste(round(breaks[z]), '-', round(breaks[z + 1])))
+legend(x = "bottomright", legend=labels, fill=ramp, bg="white", inset=0.7, cex=0.4)
+
+variables <- data.frame(Borobudur$POPDEN, Borobudur$UNEMP, Borobudur$INFORMAL, Borobudur$SHSGRADS, Borobudur$POV, Borobudur$DOMTOUR, Borobudur$FORTOUR, Borobudur$INVEST)
+stargazer(variables, title="Descriptive statistics")
+
+# Distance-based weights matrix
+latitude <- map_dbl(KecBorobudur$geometry, ~st_centroid(.x)[[1]])
+longitude <- map_dbl(KecBorobudur$geometry, ~st_centroid(.x)[[2]])
+center.coords <- cbind(latitude, longitude)
+
+Bor1_nb <- dnearneigh(center.coords, d1=0, d2=6.2, longlat = TRUE)
+nb_l <- list(d1=Bor1_nb)
+sapply(nb_l, function(x) n.comp.nb(x)$nc)
+
+plot(Borobudur$geometry, border="green")
+plot(Bor1_nb, center.coords, add=TRUE, pch=".")
+dist_lines = spdep::nb2lines(nb = Bor1_nb, coords = st_geometry(KecBorobudur), proj4string = KecBorobudur$geometry)
+dist_swm = spdep::nb2listw(neighbours = Bor1_nb)
+plot(dist_swm, center.coords, lwd=.2, col="blue", cex=.5)
+
+Borobudur.nb.card <- card(Bor1_nb)
+ggplot()+
+  geom_histogram(aes(x=Borobudur.nb.card))+
+  xlab("Number of Neighbors")
+
+pov <- POV~DOMTOUR+FORTOUR+INVEST+POPDEN+UNEMP+INFORMAL+SHSGRADS
+povtour <- POV~DOMTOUR+FORTOUR+INVEST
+
+#estimation without consideration for spatial autocorrelation
+summary(pov_pooled <- plm(povtour, data = Borobudur, index = c("NAME_4", "YEARS"), model = "pooling"))
+summary(pov_fe1 <- plm(povtour, data = Borobudur, index = c("NAME_4", "YEARS"), model = "within", effect = "individual"))
+summary(pov_re1 <- plm(povtour, data = Borobudur, index = c("NAME_4", "YEARS"), model = "random", effect = "individual"))
+
+# Hausman test (plm)
+print(hausman_panel<-phtest(povtour, data = Borobudur, index = c("NAME_4", "YEARS")))
+
+# Hausman test robust to spatial autocorrelation (splm)
+print(spat_hausman_ML_SEM<-sphtest(povtour, data=Borobudur, listw = dist_swm, index = c("NAME_4", "YEARS"), spatial.model = "error", method="ML"))
+print(spat_hausman_ML_SEM<-sphtest(povtour, data=Borobudur, listw = dist_swm, index = c("NAME_4", "YEARS"), spatial.model = "lag", method="ML"))
+
+slmtest(povtour, data=Borobudur, listw = dist_swm, test="lml", model="within", index = c("NAME_4", "YEARS"))
+slmtest(povtour, data=Borobudur, listw = dist_swm, test="lme", model="within", index = c("NAME_4", "YEARS"))
+slmtest(povtour, data=Borobudur, listw = dist_swm, test="rlml", model="within", index = c("NAME_4", "YEARS"))
+slmtest(povtour, data=Borobudur, listw = dist_swm, test="rlme", model="within", index = c("NAME_4", "YEARS"))
+
+# Likelihood Maximum estimation
+summary(pov_SAR_pool <- spml(povtour, data = Borobudur, listw = dist_swm, lag=TRUE,model="pooling", index = c("NAME_4", "YEARS")))
+
+# Fixed-effect SAR
+summary(povSAR<- spml(pov, data = Borobudur,listw = dist_swm, lag=TRUE,model="within", effect="individual", spatial.error="none", index = c("NAME_4", "YEARS")))
+summary(pov_SAR_FE<- spml(pov, data = Borobudur, listw = dist_swm, lag=TRUE,model="within", effect="twoways", spatial.error="none", index = c("NAME_4", "YEARS")))
+
+# Generalised moments method estimation
+summary(pov_SAR_FE_GM <- spgm(pov, data=Borobudur, lag = TRUE, listw = dist_swm, model="within", spatial.error = FALSE, index = c("NAME_4", "YEARS")))
+
+
+########################## EXTENSION ANALYSIS ################################
+BorobudurPanel <- pdata.frame(Borobudur, c("NAME_4", "YEARS"))
+class(BorobudurPanel)
+str(BorobudurPanel)
+BorobudurPanel
+class(BorobudurPanel$INVEST)
+str(BorobudurPanel$INVEST)
+BorobudurPanel$INVEST
+
+# Reordering of data.frame object (first time, second region)
+BorobudurPanelEx <- BorobudurPanel[order(BorobudurPanel$YEARS),]
+slag(BorobudurPanelEx$INVEST, dist_swm)
+
+### Spatial panel fixed effects (FE) SLX model ###
+BorobudurPanelEx$SLdomtour <- slag(BorobudurPanelEx$DOMTOUR, dist_swm)
+BorobudurPanel <- as.data.frame(BorobudurPanelEx)
+BorobudurPanel
+
+# SLX model with region (individual) fixed effect
+Borobudur.FEindivSLX <- plm(POV~DOMTOUR+FORTOUR+INVEST+SLdomtour, data = BorobudurPanel, model = "within", effect="individual", index = c("NAME_4", "YEARS"))
+Borobudur.FEtwowaysSLX <- plm(POV~DOMTOUR+FORTOUR+INVEST+SLdomtour, data = BorobudurPanel, model = "within", effect="twoways", index = c("NAME_4", "YEARS"))
+summary(Borobudur.FEtwowaysSLX)
+
+# Standard error of regression (SER) and coefficient of determination (Pseudo-R2)
+Borobudur.FEindivSLX$df.residual
+s2.resBorFEindivSLX <- sum(Borobudur.FEindivSLX$residuals^2)/72
+s2.resBorFEindivSLX
+
+s.resBorFEindivSLX <- sqrt(s2.resBorFEindivSLX)
+s.resBorFEindivSLX
+
+R2.BorFEindixSLX <- 1-var(Borobudur.FEindivSLX$residuals)/var(BorobudurPanel$POV)
+R2.BorFEindixSLX
+
+# Extracting and testing fixed effects: fixedef.plm
+summary(fixef(Borobudur.FEindivSLX))
+
+# Locally robust LM tests for spatial lag and error correlation in panel models
+slmtest(Borobudur.FEindivSLX, listw=dist_swm, test="lml")
+slmtest(Borobudur.FEindivSLX, listw=dist_swm, test="rlml")
+slmtest(Borobudur.FEindivSLX, listw=dist_swm, test="lme")
+slmtest(Borobudur.FEindivSLX, listw=dist_swm, test="rlme")
+
+# Pesaran local CD test for cross-sectional dependence in panels
+pcdtest(Borobudur.FEindivSLX, test="cd", list=dist_swm)
+
+# SLX with region and time (twoways) fixed effect
+Borobudur.FESLX <- plm(POV~DOMTOUR+FORTOUR+SLdomtour, data = BorobudurPanel, model = "within", effect="twoways", index = c("NAME_4", "YEARS"))
+summary(Borobudur.FESLX)
+
+# Standard error of regression and coefficient of determination (Pseudo-R2)
+Borobudur.FESLX$df.residual
+s2.resBorFESLX <- sum(Borobudur.FESLX$residuals^2)/6
+s2.resBorFESLX
+s.resBorFESLX <- sqrt(s2.resBorFESLX)
+s.resBorFESLX
+R2.BorFESLX <- 1-var(Borobudur.FESLX$residuals)/var(BorobudurPanel$POV)
+R2.BorFESLX
+
+# Extracting and testing fixed effects: fixedef.plm
+summary(fixef(Borobudur.FESLX, effect="individual"))
+summary(fixef(Borobudur.FESLX, effect="time"))
+
+# Locally robust LM tests for spatial lag and error correlation in panel models
+slmtest(Borobudur.FESLX, listw = dist_swm, test="lml")
+slmtest(Borobudur.FESLX, listw = dist_swm, test="rlml")
+slmtest(Borobudur.FESLX, listw = dist_swm, test="lme")
+slmtest(Borobudur.FESLX, listw = dist_swm, test="rlme")
+
+# Pesaran local CD test for cross-sectional dependence in panels
+pcdtest(Borobudur.FESLX, test="cd", listw = dist_swm)
+
+### Spatial panel fixed effect (FE) Durbin model ###
+
+#Spatial Durbin model with region (individual) fixed effect
+Borobudur.FEindivDurbin <- spml(POV~DOMTOUR+FORTOUR+INVEST, data = BorobudurPanel, listw = dist_swm, model="within", effect="individual", lag=TRUE, spatial.error = "none",index = c("NAME_4", "YEARS"))
+summary(Borobudur.FEindivDurbin)
+
+# Standard error of regression (SER) and coefficient of determination (Pseudo-R2)
+s2.resBorFEindivDurbin <- sum(Borobudur.FEindivDurbin$residuals^2)/7
+s2.resBorFEindivDurbin
+
+s.resBorFEindivDurbin <- sqrt(s2.resBorFEindivDurbin)
+s.resBorFEindivDurbin
+
+R2.BorFEindivDurbin <- 1-var(Borobudur.FEindivDurbin$residuals)/var(BorobudurPanel$POV)
+R2.BorFEindivDurbin
+
+# Extracting and testing fixed effects: effects.splm
+effects.splm(Borobudur.FEindivDurbin)
+
+# Computing logLik, AIC and BIC
+Borobudur.FEindivDurbin = spml(POV~DOMTOUR+FORTOUR+INVEST+POPDEN+UNEMP+INFORMAL+SHSGRADS+SLdomtour, data = BorobudurPanel, listw = dist_swm, model="within", effect="individual", lag=TRUE, spatial.error = "none", quiet = FALSE, index = c("NAME_4", "YEARS"))
+Borobudur.FEindivDurbin$logLik = 108.7048
+Borobudur.FEindivDurbin$logLik
+
+source("AICsplm.R")
+AICsplm(Borobudur.FEindivDurbin, criterion="AIC")
+AICsplm(Borobudur.FEindivDurbin, criterion="BIC")
+
+# Spatial Durbin model with region and time (twoways) fixed effect
+Borobudur.FEDurbin <- spml(POV~DOMTOUR+FORTOUR+INVEST, data = BorobudurPanel, listw = dist_swm, model="within", effect="twoways", lag=TRUE, spatial.error = "none",index = c("NAME_4", "YEARS"))
+summary(Borobudur.FEDurbin)
+
+# Standard error of regression (SER) and coefficient of determination (Pseudo-R2)
+s2.reBorFEDurbin <- sum(Borobudur.FEDurbin$residuals^2)/2
+s2.reBorFEDurbin
+s.reBorFEDurbin <- sqrt(s2.reBorFEDurbin)
+s.reBorFEDurbin
+R2.BorFEDurbin <- 1-var(Borobudur.FEDurbin$residuals)/var(BorobudurPanel$POV)
+R2.BorFEDurbin
+
+# Extracting and testing fixed effects: effects.splm
+effects.splm(Borobudur.FEDurbin)
+
+# Computing logLik, AIC and BIC
+Borobudur.FEDurbin <- spml (POV~DOMTOUR+FORTOUR+INVEST+POPDEN+UNEMP+INFORMAL+SHSGRADS+SLdomtour, data = BorobudurPanel, listw = dist_swm, model="within", effect="twoways", lag=TRUE, spatial.error = "none", quiet = FALSE, index = c("NAME_4", "YEARS"))
+Borobudur.FEDurbin$logLik = 121.7836 
+Borobudur.FEDurbin$logLik
+AICsplm(Borobudur.FEDurbin, criterion="AIC")
+AICsplm(Borobudur.FEDurbin, criterion="BIC")
+Borobudur.FEDurbin
